@@ -18,7 +18,7 @@ import DOM.Node.NodeList as NodeList
 import Data.Array (filter, length, mapWithIndex, null, (!!))
 import Data.Bifunctor (bimap)
 import Data.Const (Const(..))
-import Data.Maybe (Maybe(..), fromMaybe)
+import Data.Maybe (Maybe(..))
 import Data.Newtype (un)
 import Data.String as String
 import Data.Traversable (traverse_)
@@ -45,15 +45,15 @@ data Query item a
 data Reason
   = CuzEscape
   | CuzBlur
-  | CuzNoMatches
-  | CuzSelect
+  | CuzNoMatches String
+  | CuzSelect String
 
 showReason ∷ Reason → String
 showReason = case _ of
   CuzEscape → "CuzEscape"
   CuzBlur → "CuzBlur"
-  CuzNoMatches → "CuzNoMatches"
-  CuzSelect → "CuzSelect"
+  CuzNoMatches search → "CuzNoMatches " <> show search
+  CuzSelect itemDisplayed → "CuzSelect" <> show itemDisplayed
 
 type State item =
   { open ∷ Boolean
@@ -115,6 +115,7 @@ component { containerClass, itemFilter, itemText, itemDisplay } =
         [ HH.input [ HP.value state.inputText
                    , HE.onValueInput (HE.input Input)
                    , HE.onBlur (HE.input_ Blur)
+                   , HE.onFocus (HE.input_ Open)
                    , HE.onKeyDown (HE.input KeyDown)
                    ]
         , HH.ul
@@ -150,7 +151,7 @@ component { containerClass, itemFilter, itemText, itemDisplay } =
        H.raise (Changed input)
        if null (filter (itemFilter input) items)
          then do
-           close CuzNoMatches
+           close (CuzNoMatches input)
            pure a
          else eval (Open a)
      Blur a → do
@@ -160,12 +161,12 @@ component { containerClass, itemFilter, itemText, itemDisplay } =
        case MouseEvent.button ev of
         0 -> do
          H.liftEff (preventDefault (MouseEvent.mouseEventToEvent ev))
-         close CuzSelect
+         close (CuzSelect (itemText item))
          eval (Select item a)
         _ -> pure a
      Select item a → do
        let newInput = itemText item
-       H.modify (_ { inputText = newInput })
+       H.modify (_ { inputText = newInput, statusText = newInput })
        H.raise (Changed newInput)
        H.raise (Selected item)
        pure a
@@ -174,20 +175,28 @@ component { containerClass, itemFilter, itemText, itemDisplay } =
        case index of
          Nothing → pure a
          Just ix → do
-           count ← length <$> displayedItems
-           goto itemText (if ix == 0 then count - 1 else ix - 1)
+           displayed ← displayedItems
+           let count = length displayed
+           goToOr itemText displayed (ix - 1) (count - 1)
            pure a
      Next a → do
        { index } ← H.get
        case index of
          Nothing → pure a
          Just ix → do
-           count ← length <$> displayedItems
-           goto itemText (if ix == count then 0 else ix + 1)
+           displayed ← displayedItems
+           let count = length displayed
+           goToOr itemText displayed (ix + 1) 0
            pure a
      Open a → do
-       H.modify (_ { open = true, index = Just 0 })
-       pure a
+       input <- H.gets _.inputText
+       displayed ← displayedItems
+       case displayed !! 0 of
+         Just item -> do
+           H.modify (_ { open = true })
+           goto itemText item 0
+           pure a
+         Nothing -> eval $ Close (CuzNoMatches input) a
      Close reason a → do
        close reason
        pure a
@@ -199,7 +208,7 @@ component { containerClass, itemFilter, itemText, itemDisplay } =
            items ← displayedItems
            case (items !! _) =<< index of
              Just item → do
-              close CuzSelect
+              close (CuzSelect (itemText item))
               eval (Select item a)
              Nothing → pure a
          "Escape" → do
@@ -217,24 +226,52 @@ component { containerClass, itemFilter, itemText, itemDisplay } =
       { items, inputText } ← H.get
       pure (filter (itemFilter inputText) items)
 
+goToOr
+  ∷ ∀ m e item
+  . MonadEff (dom ∷ DOM | e) m
+  ⇒ (item → String)
+  → Array item
+  → Int
+  → Int
+  → DSL item m Unit
+goToOr itemText items i1 i2 =
+  case items !! i1 of
+    Just item -> goto itemText item i1
+    Nothing ->
+      case items !! i2 of
+        Just item -> goto itemText item i2
+        Nothing -> do
+          input <- H.gets _.inputText
+          close (CuzNoMatches input)
 goto
   ∷ ∀ m e item
   . MonadEff (dom ∷ DOM | e) m
   ⇒ (item → String)
+  → item
   → Int
   → DSL item m Unit
-goto itemText index = do
-  H.modify \state →
-    state
-      { index = Just index
-      , statusText = fromMaybe "" (itemText <$> (state.items !! index))
-      }
+goto itemText item index = do
+  H.modify _
+    { index = Just index
+    , statusText = itemText item
+    }
   H.getHTMLElementRef ulRef >>= traverse_ (scrollListToIndex index)
 
 close ∷ ∀ item m. Reason → DSL item m Unit
 close reason = do
-  whenM (H.gets _.open) do
-    H.modify (_ { index = Nothing, open = false })
+  open <- H.gets _.open
+  if open
+    then do
+      H.modify (_ { index = Nothing, open = false, statusText = message })
+    else case reason of
+      CuzNoMatches _ ->
+        H.modify (_ { statusText = message })
+      _ -> pure unit
+  where
+    message = case reason of
+      CuzNoMatches search -> "Nothing matches " <> show search
+      CuzSelect itemDisplayed -> "Selected " <> itemDisplayed
+      _ -> ""
 
 scrollListToIndex ∷ ∀ m e. MonadEff (dom ∷ DOM | e) m ⇒ Int → HTMLElement → m Unit
 scrollListToIndex index el = H.liftEff do
