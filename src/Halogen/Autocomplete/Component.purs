@@ -2,24 +2,19 @@ module Halogen.Autocomplete.Component where
 
 import Prelude
 
-import Control.Monad.Eff.Class (class MonadEff)
+import Effect.Class (class MonadEffect)
 import Control.MonadPlus (guard)
-import DOM (DOM)
-import DOM.Event.Event (preventDefault)
-import DOM.Event.KeyboardEvent (KeyboardEvent)
-import DOM.Event.KeyboardEvent as KeyEv
-import DOM.Event.MouseEvent (MouseEvent)
-import DOM.Event.MouseEvent as MouseEvent
-import DOM.HTML.HTMLElement (offsetTop)
-import DOM.HTML.Types (HTMLElement, htmlElementToElement, htmlElementToNode)
-import DOM.Node.Element (clientHeight, setScrollTop)
-import DOM.Node.Node (childNodes)
-import DOM.Node.NodeList as NodeList
+import Web.Event.Event (preventDefault)
+import Web.UIEvent.KeyboardEvent (KeyboardEvent)
+import Web.UIEvent.KeyboardEvent as KeyEv
+import Web.UIEvent.MouseEvent (MouseEvent)
+import Web.UIEvent.MouseEvent as MouseEvent
+import Web.HTML.HTMLElement (offsetTop, HTMLElement, toElement, toNode)
+import Web.DOM.Element (clientHeight, setScrollTop)
+import Web.DOM.Node (childNodes)
+import Web.DOM.NodeList as NodeList
 import Data.Array (filter, length, mapWithIndex, null, (!!))
-import Data.Bifunctor (bimap)
-import Data.Const (Const(..))
 import Data.Maybe (Maybe(..))
-import Data.Newtype (un)
 import Data.String as String
 import Data.Traversable (traverse_)
 import Halogen as H
@@ -66,31 +61,31 @@ type State item =
 data Message item = Changed String | Selected item
 type Input = Array
 
-type HTML item = H.ComponentHTML (Query item)
-type DSL item m = H.ComponentDSL (State item) (Query item) (Message item) m
+type HTML item m = H.ComponentHTML (Query item) () m
+type DSL item m = H.HalogenM (State item) (Query item) () (Message item) m
 
 type Config item =
   { containerClass ∷ HH.ClassName
   , itemFilter ∷ String → item → Boolean
   , itemText ∷ item → String
-  , itemDisplay ∷ item → H.HTML Void (Const Void)
+  , itemDisplay ∷ item → HH.PlainHTML
   }
 
 defaultConfig ∷ Config String
 defaultConfig =
   { containerClass: HH.ClassName "halogen-autocomplete"
   , itemFilter: \input item → not String.null input && String.contains (String.Pattern input) item
-  , itemText: id
+  , itemText: identity
   , itemDisplay: \item → HH.text item
   }
 
 component
-  ∷ ∀ item e m
-  . MonadEff (dom ∷ DOM | e) m
+  ∷ ∀ item m
+  . MonadEffect m
   ⇒ Config item
   → H.Component HH.HTML (Query item) (Input item) (Message item) m
 component { containerClass, itemFilter, itemText, itemDisplay } =
-  H.lifecycleComponent
+  H.component
    { initialState
    , render
    , eval
@@ -107,7 +102,7 @@ component { containerClass, itemFilter, itemText, itemDisplay } =
       , inputText: ""
       }
 
-    render ∷ State item → HTML item
+    render ∷ State item → HTML item m
     render state =
       HH.div
         [ HP.class_ containerClass
@@ -137,16 +132,16 @@ component { containerClass, itemFilter, itemText, itemDisplay } =
             [ HE.onMouseDown (HE.input (ItemClick item))
             , Aria.selected (if Just ix == state.index then "true" else "false")
             ]
-            [ bimap absurd (absurd <<< un Const) (itemDisplay item) ]
+            [ HH.fromPlainHTML (itemDisplay item) ]
 
     eval ∷ Query item ~> DSL item m
     eval = case _ of
      Init a → pure a
      UpdateItems items a → do
-       H.modify (_ { items = items })
+       H.modify_ _ { items = items }
        pure a
      Input input a → do
-       H.modify (_ { inputText = input })
+       H.modify_ _ { inputText = input }
        { items } ← H.get
        H.raise (Changed input)
        if null (filter (itemFilter input) items)
@@ -160,13 +155,13 @@ component { containerClass, itemFilter, itemText, itemDisplay } =
      ItemClick item ev a → do
        case MouseEvent.button ev of
         0 -> do
-         H.liftEff (preventDefault (MouseEvent.mouseEventToEvent ev))
+         H.liftEffect (preventDefault (MouseEvent.toEvent ev))
          close (CuzSelect (itemText item))
          eval (Select item a)
         _ -> pure a
      Select item a → do
        let newInput = itemText item
-       H.modify (_ { inputText = newInput, statusText = newInput })
+       H.modify_ _ { inputText = newInput, statusText = newInput }
        H.raise (Changed newInput)
        H.raise (Selected item)
        pure a
@@ -193,7 +188,7 @@ component { containerClass, itemFilter, itemText, itemDisplay } =
        displayed ← displayedItems
        case displayed !! 0 of
          Just item -> do
-           H.modify (_ { open = true })
+           H.modify_ _ { open = true }
            goto itemText item 0
            pure a
          Nothing -> eval $ Close (CuzNoMatches input) a
@@ -203,7 +198,7 @@ component { containerClass, itemFilter, itemText, itemDisplay } =
      KeyDown ev a → do
        case KeyEv.code ev of
          "Enter" → do
-           H.liftEff (preventDefault (KeyEv.keyboardEventToEvent ev))
+           H.liftEffect (preventDefault (KeyEv.toEvent ev))
            { index } ← H.get
            items ← displayedItems
            case (items !! _) =<< index of
@@ -215,10 +210,10 @@ component { containerClass, itemFilter, itemText, itemDisplay } =
            close CuzEscape
            pure a
          "ArrowUp" → do
-           H.liftEff (preventDefault (KeyEv.keyboardEventToEvent ev))
+           H.liftEffect (preventDefault (KeyEv.toEvent ev))
            eval (Previous a)
          "ArrowDown" → do
-           H.liftEff (preventDefault (KeyEv.keyboardEventToEvent ev))
+           H.liftEffect (preventDefault (KeyEv.toEvent ev))
            eval (Next a)
          _ → pure a
 
@@ -227,8 +222,8 @@ component { containerClass, itemFilter, itemText, itemDisplay } =
       pure (filter (itemFilter inputText) items)
 
 goToOr
-  ∷ ∀ m e item
-  . MonadEff (dom ∷ DOM | e) m
+  ∷ ∀ m item
+  . MonadEffect m
   ⇒ (item → String)
   → Array item
   → Int
@@ -244,14 +239,14 @@ goToOr itemText items i1 i2 =
           input <- H.gets _.inputText
           close (CuzNoMatches input)
 goto
-  ∷ ∀ m e item
-  . MonadEff (dom ∷ DOM | e) m
+  ∷ ∀ m item
+  . MonadEffect m
   ⇒ (item → String)
   → item
   → Int
   → DSL item m Unit
 goto itemText item index = do
-  H.modify _
+  H.modify_ _
     { index = Just index
     , statusText = itemText item
     }
@@ -262,10 +257,10 @@ close reason = do
   open <- H.gets _.open
   if open
     then do
-      H.modify (_ { index = Nothing, open = false, statusText = message })
+      H.modify_ _ { index = Nothing, open = false, statusText = message }
     else case reason of
       CuzNoMatches _ ->
-        H.modify (_ { statusText = message })
+        H.modify_ _ { statusText = message }
       _ -> pure unit
   where
     message = case reason of
@@ -273,18 +268,18 @@ close reason = do
       CuzSelect itemDisplayed -> "Selected " <> itemDisplayed
       _ -> ""
 
-scrollListToIndex ∷ ∀ m e. MonadEff (dom ∷ DOM | e) m ⇒ Int → HTMLElement → m Unit
-scrollListToIndex index el = H.liftEff do
-  lis ← childNodes (htmlElementToNode el)
+scrollListToIndex ∷ ∀ m. MonadEffect m ⇒ Int → HTMLElement → m Unit
+scrollListToIndex index el = H.liftEffect do
+  lis ← childNodes (toNode el)
   NodeList.item index lis >>= traverse_ \item → do
     let
       -- TODO: Let's try to do better here
       itemElement ∷ HTMLElement
       itemElement = unsafeCoerce item
     itemTop ← offsetTop itemElement
-    ulHeight ← clientHeight (htmlElementToElement el)
-    itemHeight ← clientHeight (htmlElementToElement itemElement)
-    setScrollTop (itemTop - ulHeight + itemHeight) (htmlElementToElement el)
+    ulHeight ← clientHeight (toElement el)
+    itemHeight ← clientHeight (toElement itemElement)
+    setScrollTop (itemTop - ulHeight + itemHeight) (toElement el)
 
 
 ulRef ∷ H.RefLabel
